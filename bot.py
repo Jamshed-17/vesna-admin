@@ -1,6 +1,6 @@
 import vk_api
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
-from configg import BOT_TOKEN, GROUP_ID
+from config import BOT_TOKEN, GROUP_ID
 from temp_word import abusive_language
 import re
 from urllib.parse import urlparse
