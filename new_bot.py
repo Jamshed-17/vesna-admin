@@ -1,11 +1,9 @@
 import vk_api
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
-from checking_message import main_check_add
 from configg import BOT_TOKEN, GROUP_ID
 from temp_word import abusive_language
 import re
 from urllib.parse import urlparse
-import time
 
 TOKEN = BOT_TOKEN
 
@@ -33,7 +31,7 @@ class SmartModerator:
         self.obscene_regex = [re.compile(p, re.IGNORECASE) for p in OBSCENE_PATTERNS]
 
         self.user_warnings = {}  # {user_id: count}
-        self.deleted_messages = {}  # {peer_id: {'msg_id': ..., 'text': ..., 'user_id': ..., 'reason': ...}}
+        self.deleted_messages = {}  # {peer_id: {...}}
 
     def delete_message(self, msg_id, peer_id, user_id, text, reason):
         try:
@@ -43,53 +41,67 @@ class SmartModerator:
                 cmids=msg_id,
                 group_id=GROUP_ID
             )
+        except:
+            return  # сообщение удалить не удалось
 
-            # Сохраняем последнее удаление
-            self.deleted_messages[peer_id] = {
-                'msg_id': msg_id,
-                'text': text,
-                'user_id': user_id,
-                'reason': reason
-            }
+        # Сохраняем удалённое сообщение
+        self.deleted_messages[peer_id] = {
+            'msg_id': msg_id,
+            'text': text,
+            'user_id': user_id,
+            'reason': reason
+        }
 
-            # Увеличиваем предупреждение
-            self.user_warnings[user_id] = self.user_warnings.get(user_id, 0) + 1
-            warning = self.user_warnings[user_id]
+        # Увеличиваем предупреждение пользователя
+        self.user_warnings[user_id] = self.user_warnings.get(user_id, 0) + 1
+        warning = self.user_warnings[user_id]
 
-            # Отправка уведомления
-            self.vk.messages.send(
-                peer_id=peer_id,
-                message=f"⚠️ Сообщение удалено из-за нарушения правил сообщества, предупреждение {warning}/3",
-                random_id=0
-            )
+        # Сообщение о предупреждении
+        self.vk.messages.send(
+            peer_id=peer_id,
+            message=f"⚠️ Сообщение удалено из-за нарушения правил сообщества, предупреждение {warning}/3",
+            random_id=0
+        )
 
-            # Бан при 3 предупреждениях
-            if warning >= 3:
+        # Бан пользователя при 3 предупреждениях
+        if warning >= 3:
+            chat_id = peer_id - 2000000000
+            try:
+                self.vk.messages.removeChatUser(
+                    chat_id=chat_id,
+                    member_id=user_id
+                )
                 self.vk.messages.send(
                     peer_id=peer_id,
-                    message=f"🚫 [id{user_id}|Пользователь] заблокирован за 3 нарушения.",
+                    message=f"🚫 Пользователь [id{user_id}|заблокирован] за 3 нарушения.",
                     random_id=0
                 )
-                # Здесь можно реализовать бан через chat_kick, если нужно
-        except Exception:
-            pass
+            except:
+                self.vk.messages.send(
+                    peer_id=peer_id,
+                    message=f"❌ Не удалось исключить пользователя [id{user_id}|пользователь]. Возможно, у бота нет прав администратора.",
+                    random_id=0
+                )
 
-    def restore_message(self, peer_id):
+    def restore_message(self, peer_id, admin_id):
         data = self.deleted_messages.get(peer_id)
         if not data:
             return
 
         user_id = data['user_id']
+        text = data['text']
+
+        # Минус предупреждение за отмену удаления
         self.user_warnings[user_id] = max(0, self.user_warnings.get(user_id, 1) - 1)
 
         try:
             self.vk.messages.send(
                 peer_id=peer_id,
-                message=f"↩️ Отмена: восстановлено сообщение от [id{user_id}|пользователя]:\n\n{data['text']}",
+                message=f"↩️ Администратор [id{admin_id}|отменил] последнее удаление:\n\nСообщение от [id{user_id}|пользователя]:\n{text}",
                 random_id=0
             )
             del self.deleted_messages[peer_id]
-        except Exception:
+        except:
             pass
 
     def is_spam(self, text):
@@ -98,7 +110,7 @@ class SmartModerator:
 
         urls = re.findall(r'http[s]?://[^\s]+', text)
         suspicious_domains = any(
-            urlparse(url).netloc.endswith(('.com', '.ru', '.net')) 
+            urlparse(url).netloc.endswith(('.com', '.ru', '.net'))
             for url in urls
         )
 
@@ -113,6 +125,16 @@ class SmartModerator:
             return "флуд"
         return None
 
+    def is_admin(self, peer_id, user_id):
+        try:
+            members = self.vk.messages.getConversationMembers(peer_id=peer_id)
+            for m in members['items']:
+                if m['member_id'] == user_id:
+                    return m.get('is_admin', False) or m.get('is_owner', False)
+        except:
+            return False
+        return False
+
     def run(self):
         for event in self.longpoll.listen():
             if event.type == VkBotEventType.MESSAGE_NEW and event.from_chat:
@@ -126,7 +148,14 @@ class SmartModerator:
                     continue
 
                 if text.lower() == "/отмена":
-                    self.restore_message(peer_id)
+                    if self.is_admin(peer_id, user_id):
+                        self.restore_message(peer_id, admin_id=user_id)
+                    else:
+                        self.vk.messages.send(
+                            peer_id=peer_id,
+                            message="⛔ Команду /отмена может использовать только администратор чата.",
+                            random_id=0
+                        )
                     continue
 
                 reason = self.check_message(text)
